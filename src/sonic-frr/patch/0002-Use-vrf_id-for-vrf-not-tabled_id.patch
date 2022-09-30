@@ -1,17 +1,17 @@
-From 39bb40dc4bad4462e4ae9c98580d75fa2c92e032 Mon Sep 17 00:00:00 2001
+From 6949e716b96ae5bc658e1a86a6924a0af8d63a1b Mon Sep 17 00:00:00 2001
 From: Pavel Shirshov <pavelsh@microsoft.com>
 Date: Mon, 16 Nov 2020 18:29:46 -0800
-Subject: [PATCH 3/8] Use vrf_id for vrf, not tabled_id
+Subject: [PATCH 02/10] Use vrf_id for vrf, not tabled_id
 
 ---
  zebra/zebra_fpm_netlink.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/zebra/zebra_fpm_netlink.c b/zebra/zebra_fpm_netlink.c
-index ec22c5dd4..aad0156b3 100644
+index 1dc93c01d..7f4517fe9 100644
 --- a/zebra/zebra_fpm_netlink.c
 +++ b/zebra/zebra_fpm_netlink.c
-@@ -287,7 +287,7 @@ static int netlink_route_info_fill(struct netlink_route_info *ri, int cmd,
+@@ -489,7 +489,7 @@ static int netlink_route_info_fill(struct netlink_route_info *ri, int cmd,
  		ri->nlmsg_pid = zvrf->zns->netlink_dplane_out.snl.nl_pid;
  
  	ri->nlmsg_type = cmd;
@@ -21,5 +21,5 @@ index ec22c5dd4..aad0156b3 100644
  
  	/*
 -- 
-2.12.2
+2.25.1
 
