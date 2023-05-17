@@ -8,4 +8,6 @@ Disable-ipv6-src-address-test-in-pceplib.patch
 cross-compile-changes.patch
 0009-ignore-route-from-default-table.patch
 0023-Use-vrf_id-for-vrf-not-tabled_id.patch
+0027-add-the-missing-source-addr-param-for-srv6-encap.patch
+0028-extend-the-fpm-module-to-push-the-missing-srv6-information.patch
 

@@ -1,0 +1,515 @@
+From 55f81c26570d8fa0250cedca08b08fe07eac63f3 Mon Sep 17 00:00:00 2001
+From: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+Date: Thu, 10 Nov 2022 02:54:56 +0100
+Subject: [PATCH 1/4] zebra: Print an error if nh_encap_type is unknown
+
+This commit prints an error message when `netlink_route_nexthop_encap()`
+receives a nexthop with an unknown encap type.
+
+Signed-off-by: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+---
+ zebra/rt_netlink.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/zebra/rt_netlink.c b/zebra/rt_netlink.c
+index 587045eac..531ab04d5 100644
+--- a/zebra/rt_netlink.c
++++ b/zebra/rt_netlink.c
+@@ -2033,6 +2033,8 @@ static int netlink_route_nexthop_encap(struct nlmsghdr *n, size_t nlen,
+ 
+ 		nl_attr_nest_end(n, nest);
+ 		break;
++	default:
++		zlog_err("Unsupported encap type %d", nh->nh_encap_type);
+ 	}
+ 
+ 	return true;
+-- 
+2.20.1
+
+
+From 5cda62c2ee3fc5badb229c51fcdf980204e59bf3 Mon Sep 17 00:00:00 2001
+From: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+Date: Thu, 10 Nov 2022 03:04:25 +0100
+Subject: [PATCH 2/4] zebra: Add `fpm` param to the route build function
+
+This commit adds a new parameter `fpm` to the
+`_netlink_route_build_singlepath()` function. This parameter
+lets `_netlink_route_build_singlepath()` know if a route is installed
+via FPM or not.
+
+This is useful for implementing use cases where a route must be encoded
+differently depending on whether it is installed via FPM or not.
+
+Signed-off-by: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+---
+ zebra/rt_netlink.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/zebra/rt_netlink.c b/zebra/rt_netlink.c
+index 531ab04d5..867b19399 100644
+--- a/zebra/rt_netlink.c
++++ b/zebra/rt_netlink.c
+@@ -1507,7 +1507,7 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
+ 					    const struct nexthop *nexthop,
+ 					    struct nlmsghdr *nlmsg,
+ 					    struct rtmsg *rtmsg,
+-					    size_t req_size, int cmd)
++					    size_t req_size, int cmd, bool fpm)
+ {
+ 
+ 	char label_buf[256];
+@@ -1904,7 +1904,7 @@ _netlink_mpls_build_singlepath(const struct prefix *p, const char *routedesc,
+ 	bytelen = (family == AF_INET ? 4 : 16);
+ 	return _netlink_route_build_singlepath(p, routedesc, bytelen,
+ 					       nhlfe->nexthop, nlmsg, rtmsg,
+-					       req_size, cmd);
++					       req_size, cmd, false);
+ }
+ 
+ 
+@@ -2296,7 +2296,8 @@ ssize_t netlink_route_multipath_msg_encode(int cmd,
+ 
+ 				if (!_netlink_route_build_singlepath(
+ 					    p, routedesc, bytelen, nexthop,
+-					    &req->n, &req->r, datalen, cmd))
++					    &req->n, &req->r, datalen, cmd,
++					    fpm))
+ 					return 0;
+ 				nexthop_num++;
+ 				break;
+-- 
+2.20.1
+
+
+From dee5fe54a46b4313808e10a9ba6b3af197583ebe Mon Sep 17 00:00:00 2001
+From: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+Date: Thu, 10 Nov 2022 03:06:40 +0100
+Subject: [PATCH 3/4] zebra: Extend FPM to send missing seg6 info
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Zebra’s `dplane_fpm_nl` module allows an external component to learn the
+forwarding information computed by the FRR routing suite. Currently, the
+SRv6 routes exported by the `dplane_fpm_nl` module do not include some
+information such as the source address for the SRv6 encapsulation.
+
+This commit adds the missing information to the SRv6 routes exported
+by the `dplane_fpm_nl`.
+
+Signed-off-by: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+---
+ lib/nexthop.h      |  7 +++++++
+ zebra/rt_netlink.c | 25 ++++++++++++++++++++++++-
+ 2 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/lib/nexthop.h b/lib/nexthop.h
+index 7b4bbbafd..20387ef80 100644
+--- a/lib/nexthop.h
++++ b/lib/nexthop.h
+@@ -58,6 +58,13 @@ enum blackhole_type {
+ 
+ enum nh_encap_type {
+ 	NET_VXLAN = 100, /* value copied from FPM_NH_ENCAP_VXLAN. */
++	FPM_NH_ENCAP_SRV6_ROUTE = 101,
++};
++
++enum {
++	SRV6_ROUTE_UNSPEC            = 0,
++	SRV6_ROUTE_VPN_SID           = 1,
++	SRV6_ROUTE_ENCAP_SRC_ADDR    = 2,
+ };
+ 
+ /* Fixed limit on the number of backup nexthops per primary nexthop */
+diff --git a/zebra/rt_netlink.c b/zebra/rt_netlink.c
+index 867b19399..5da9695ee 100644
+--- a/zebra/rt_netlink.c
++++ b/zebra/rt_netlink.c
+@@ -1523,7 +1523,7 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
+ 					      sizeof(label_buf)))
+ 		return false;
+ 
+-	if (nexthop->nh_srv6) {
++	if (!fpm && nexthop->nh_srv6) {
+ 		if (nexthop->nh_srv6->seg6local_action !=
+ 		    ZEBRA_SEG6_LOCAL_ACTION_UNSPEC) {
+ 			struct rtattr *nest;
+@@ -1636,6 +1636,29 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
+ 		}
+ 	}
+ 
++	if (fpm && nexthop->nh_srv6) {
++		if (!sid_zero(&nexthop->nh_srv6->seg6_segs)) {
++			struct zebra_srv6 *srv6 = zebra_srv6_get_default();
++			struct rtattr *nest;
++
++			if (!nl_attr_put16(nlmsg, req_size, RTA_ENCAP_TYPE,
++					   FPM_NH_ENCAP_SRV6_ROUTE))
++				return false;
++			nest = nl_attr_nest(nlmsg, req_size, RTA_ENCAP);
++			if (!nest)
++				return false;
++			if (!nl_attr_put(
++				    nlmsg, req_size, SRV6_ROUTE_ENCAP_SRC_ADDR,
++				    &srv6->encap_src_addr, IPV6_MAX_BYTELEN))
++				return false;
++			if (!nl_attr_put(nlmsg, req_size, SRV6_ROUTE_VPN_SID,
++					 &nexthop->nh_srv6->seg6_segs,
++					 IPV6_MAX_BYTELEN))
++				return false;
++			nl_attr_nest_end(nlmsg, nest);
++		}
++	}
++
+ 	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ONLINK))
+ 		rtmsg->rtm_flags |= RTNH_F_ONLINK;
+ 
+-- 
+2.20.1
+
+
+From 00cd2e0e764e127b757b5e22130269f54824c28b Mon Sep 17 00:00:00 2001
+From: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+Date: Thu, 10 Nov 2022 08:32:20 +0100
+Subject: [PATCH 4/4] zebra: Extend FPM to send missing seg6local info
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Zebra’s `dplane_fpm_nl` module allows an external component to learn the
+forwarding information computed by the FRR routing suite. Currently, the
+SRv6 Local SIDs exported by the `dplane_fpm_nl` module do not include
+some information such the SID format (i.e., locator block length,
+locator node length, function length, and argument length).
+
+This commit adds the missing information to the SRv6 Local SIDs exported
+by the `dplane_fpm_nl`.
+
+Signed-off-by: Carmine Scarpitta <carmine.scarpitta@uniroma2.it>
+---
+ lib/nexthop.h      |  49 ++++++++++
+ zebra/rt_netlink.c | 233 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 282 insertions(+)
+
+diff --git a/lib/nexthop.h b/lib/nexthop.h
+index 20387ef80..68b91a639 100644
+--- a/lib/nexthop.h
++++ b/lib/nexthop.h
+@@ -59,6 +59,7 @@ enum blackhole_type {
+ enum nh_encap_type {
+ 	NET_VXLAN = 100, /* value copied from FPM_NH_ENCAP_VXLAN. */
+ 	FPM_NH_ENCAP_SRV6_ROUTE = 101,
++	FPM_NH_ENCAP_SRV6_LOCAL_SID = 102,
+ };
+ 
+ enum {
+@@ -67,6 +68,54 @@ enum {
+ 	SRV6_ROUTE_ENCAP_SRC_ADDR    = 2,
+ };
+ 
++enum srv6_localsid_action {
++	FPM_SRV6_LOCALSID_ACTION_UNSPEC       = 0,
++	FPM_SRV6_LOCALSID_ACTION_END          = 1,
++	FPM_SRV6_LOCALSID_ACTION_END_X        = 2,
++	FPM_SRV6_LOCALSID_ACTION_END_T        = 3,
++	FPM_SRV6_LOCALSID_ACTION_END_DX2      = 4,
++	FPM_SRV6_LOCALSID_ACTION_END_DX6      = 5,
++	FPM_SRV6_LOCALSID_ACTION_END_DX4      = 6,
++	FPM_SRV6_LOCALSID_ACTION_END_DT6      = 7,
++	FPM_SRV6_LOCALSID_ACTION_END_DT4      = 8,
++	FPM_SRV6_LOCALSID_ACTION_END_B6       = 9,
++	FPM_SRV6_LOCALSID_ACTION_END_B6_ENCAP = 10,
++	FPM_SRV6_LOCALSID_ACTION_END_BM       = 11,
++	FPM_SRV6_LOCALSID_ACTION_END_S        = 12,
++	FPM_SRV6_LOCALSID_ACTION_END_AS       = 13,
++	FPM_SRV6_LOCALSID_ACTION_END_AM       = 14,
++	FPM_SRV6_LOCALSID_ACTION_END_BPF      = 15,
++	FPM_SRV6_LOCALSID_ACTION_END_DT46     = 16,
++	FPM_SRV6_LOCALSID_ACTION_UDT4         = 100,
++	FPM_SRV6_LOCALSID_ACTION_UDT6         = 101,
++	FPM_SRV6_LOCALSID_ACTION_UDT46        = 102,
++	FPM_SRV6_LOCALSID_ACTION_MAX,
++};
++
++enum {
++	FPM_SRV6_LOCALSID_UNSPEC         = 0,
++	FPM_SRV6_LOCALSID_ACTION         = 1,
++	FPM_SRV6_LOCALSID_SRH            = 2,
++	FPM_SRV6_LOCALSID_TABLE          = 3,
++	FPM_SRV6_LOCALSID_NH4            = 4,
++	FPM_SRV6_LOCALSID_NH6            = 5,
++	FPM_SRV6_LOCALSID_IIF            = 6,
++	FPM_SRV6_LOCALSID_OIF            = 7,
++	FPM_SRV6_LOCALSID_BPF            = 8,
++	FPM_SRV6_LOCALSID_VRFTABLE       = 9,
++	FPM_SRV6_LOCALSID_COUNTERS       = 10,
++	FPM_SRV6_LOCALSID_VRFNAME        = 100,
++	FPM_SRV6_LOCALSID_FORMAT         = 101,
++};
++
++enum {
++	FPM_SRV6_LOCALSID_FORMAT_UNSPEC         = 0,
++	FPM_SRV6_LOCALSID_FORMAT_BLOCK_LEN      = 1,
++	FPM_SRV6_LOCALSID_FORMAT_NODE_LEN       = 2,
++	FPM_SRV6_LOCALSID_FORMAT_FUNC_LEN       = 3,
++	FPM_SRV6_LOCALSID_FORMAT_ARG_LEN        = 4,
++};
++
+ /* Fixed limit on the number of backup nexthops per primary nexthop */
+ #define NEXTHOP_MAX_BACKUPS  8
+ 
+diff --git a/zebra/rt_netlink.c b/zebra/rt_netlink.c
+index 5da9695ee..dabefa8f3 100644
+--- a/zebra/rt_netlink.c
++++ b/zebra/rt_netlink.c
+@@ -430,6 +430,29 @@ static uint32_t table_lookup_by_vrf(vrf_id_t vrf_id, ns_id_t ns_id)
+ 	return RT_TABLE_UNSPEC;
+ }
+ 
++static struct zebra_vrf *vrf_lookup_by_table_id(uint32_t table_id)
++{
++	struct vrf *vrf;
++	struct zebra_vrf *zvrf;
++
++	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
++		zvrf = vrf->info;
++		if (zvrf == NULL)
++			continue;
++		/* case vrf with netns : match the netnsid */
++		if (vrf_is_backend_netns()) {
++			return NULL;
++		} else {
++			/* VRF is VRF_BACKEND_VRF_LITE */
++			if (zvrf->table_id != table_id)
++				continue;
++			return zvrf;
++		}
++	}
++
++	return NULL;
++}
++
+ /**
+  * @parse_encap_mpls() - Parses encapsulated mpls attributes
+  * @tb:         Pointer to rtattr to look for nested items in.
+@@ -1637,6 +1660,216 @@ static bool _netlink_route_build_singlepath(const struct prefix *p,
+ 	}
+ 
+ 	if (fpm && nexthop->nh_srv6) {
++		if (nexthop->nh_srv6->seg6local_action !=
++		    ZEBRA_SEG6_LOCAL_ACTION_UNSPEC) {
++			struct zebra_srv6 *srv6 = zebra_srv6_get_default();
++			struct zebra_vrf *zvrf;
++			bool locator_found = false;
++			struct srv6_locator *locator;
++			struct listnode *node;
++			struct rtattr *nest, *inner_nest;
++			const struct seg6local_context *ctx;
++
++			ctx = &nexthop->nh_srv6->seg6local_ctx;
++
++			if (!nl_attr_put16(nlmsg, req_size, RTA_ENCAP_TYPE,
++					   FPM_NH_ENCAP_SRV6_LOCAL_SID))
++				return false;
++
++			for (ALL_LIST_ELEMENTS_RO(srv6->locators, node,
++						  locator)) {
++				if (prefix_match(&locator->prefix, p)) {
++					locator_found = true;
++					break;
++				}
++			}
++
++			nest = nl_attr_nest(nlmsg, req_size, RTA_ENCAP);
++
++			/* Process Local SID format */
++			if (locator_found) {
++				inner_nest =
++					nl_attr_nest(nlmsg, req_size,
++						     FPM_SRV6_LOCALSID_FORMAT);
++
++				if (locator->block_bits_length)
++					if (!nl_attr_put8(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_FORMAT_BLOCK_LEN,
++						    locator->block_bits_length))
++						return false;
++
++				if (locator->node_bits_length)
++					if (!nl_attr_put8(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_FORMAT_NODE_LEN,
++						    locator->node_bits_length))
++						return false;
++
++				if (locator->function_bits_length)
++					if (!nl_attr_put8(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_FORMAT_FUNC_LEN,
++						    locator->function_bits_length))
++						return false;
++
++				if (locator->argument_bits_length)
++					if (!nl_attr_put8(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_FORMAT_ARG_LEN,
++						    locator->argument_bits_length))
++						return false;
++
++				nl_attr_nest_end(nlmsg, inner_nest);
++			}
++
++			switch (nexthop->nh_srv6->seg6local_action) {
++			case ZEBRA_SEG6_LOCAL_ACTION_END:
++				if (!nl_attr_put32(
++					    nlmsg, req_size,
++					    FPM_SRV6_LOCALSID_ACTION,
++					    FPM_SRV6_LOCALSID_ACTION_END))
++					return false;
++
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_X:
++				if (!nl_attr_put32(
++					    nlmsg, req_size,
++					    FPM_SRV6_LOCALSID_ACTION,
++					    FPM_SRV6_LOCALSID_ACTION_END_X))
++					return false;
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_NH6,
++						 &ctx->nh6,
++						 sizeof(struct in6_addr)))
++					return false;
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_T:
++				zvrf = vrf_lookup_by_table_id(ctx->table);
++				if (!zvrf)
++					return false;
++
++				if (!nl_attr_put32(
++					    nlmsg, req_size,
++					    FPM_SRV6_LOCALSID_ACTION,
++					    FPM_SRV6_LOCALSID_ACTION_END_T))
++					return false;
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_VRFNAME,
++						 zvrf->vrf->name,
++						 strlen(zvrf->vrf->name) + 1))
++					return false;
++
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_DX4:
++				if (!nl_attr_put32(
++					    nlmsg, req_size,
++					    FPM_SRV6_LOCALSID_ACTION,
++					    FPM_SRV6_LOCALSID_ACTION_END_DX4))
++					return false;
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_NH4,
++						 &ctx->nh4,
++						 sizeof(struct in_addr)))
++					return false;
++
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_DT6:
++				zvrf = vrf_lookup_by_table_id(ctx->table);
++				if (!zvrf)
++					return false;
++
++				if (locator_found &&
++				    CHECK_FLAG(locator->flags,
++					       SRV6_LOCATOR_USID)) {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_UDT6))
++						return false;
++				} else {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_END_DT6))
++						return false;
++				}
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_VRFNAME,
++						 zvrf->vrf->name,
++						 strlen(zvrf->vrf->name) + 1))
++					return false;
++
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_DT4:
++				zvrf = vrf_lookup_by_table_id(ctx->table);
++				if (!zvrf)
++					return false;
++
++				if (locator_found &&
++				    CHECK_FLAG(locator->flags,
++					       SRV6_LOCATOR_USID)) {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_UDT4))
++						return false;
++				} else {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_END_DT4))
++						return false;
++				}
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_VRFNAME,
++						 zvrf->vrf->name,
++						 strlen(zvrf->vrf->name) + 1))
++					return false;
++
++				break;
++			case ZEBRA_SEG6_LOCAL_ACTION_END_DT46:
++				zvrf = vrf_lookup_by_table_id(ctx->table);
++				if (!zvrf)
++					return false;
++
++				if (locator_found &&
++				    CHECK_FLAG(locator->flags,
++					       SRV6_LOCATOR_USID)) {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_UDT46))
++						return false;
++				} else {
++					if (!nl_attr_put32(
++						    nlmsg, req_size,
++						    FPM_SRV6_LOCALSID_ACTION,
++						    FPM_SRV6_LOCALSID_ACTION_END_DT46))
++						return false;
++				}
++
++				if (!nl_attr_put(nlmsg, req_size,
++						 FPM_SRV6_LOCALSID_VRFNAME,
++						 zvrf->vrf->name,
++						 strlen(zvrf->vrf->name) + 1))
++					return false;
++
++				break;
++			default:
++				zlog_err(
++					"Unsupported seg6local behaviour action=%u",
++					nexthop->nh_srv6->seg6local_action);
++				return false;
++			}
++			nl_attr_nest_end(nlmsg, nest);
++		}
++
+ 		if (!sid_zero(&nexthop->nh_srv6->seg6_segs)) {
+ 			struct zebra_srv6 *srv6 = zebra_srv6_get_default();
+ 			struct rtattr *nest;
+-- 
+2.20.1
+
