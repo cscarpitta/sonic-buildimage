@@ -124,13 +124,14 @@ enum custom_rtattr_srv6_localsid {
 
 enum custom_rtattr_encap_srv6 {
 	FPM_ROUTE_ENCAP_SRV6_ENCAP_UNSPEC		= 0,
-	FPM_ROUTE_ENCAP_SRV6_VPN_SID			= 1,
+	FPM_ROUTE_ENCAP_SRV6_SEGMENTS			= 1,
 	FPM_ROUTE_ENCAP_SRV6_ENCAP_SRC_ADDR		= 2,
 	FPM_ROUTE_ENCAP_SRV6_PIC_ID			= 3,
 	FPM_ROUTE_ENCAP_SRV6_NH_ID  			= 4,
 	FPM_ROUTE_ENCAP_SRV6_ENCAP_SIDLIST_NAME		= 5,
 	FPM_ROUTE_ENCAP_SRV6_ENCAP_SIDLIST_LEN		= 6,
 	FPM_ROUTE_ENCAP_SRV6_ENCAP_SIDLIST		= 7,
+	FPM_ROUTE_ENCAP_SRV6_SEGMENTS_NUM		= 8,
 };
 
 enum custom_rtattr_srv6_localsid_format {
@@ -1508,10 +1509,15 @@ static ssize_t netlink_srv6_vpn_route_msg_encode(int cmd,
 			&req->n, datalen, FPM_ROUTE_ENCAP_SRV6_ENCAP_SRC_ADDR,
 			&encap_src_addr, IPV6_MAX_BYTELEN))
 		return false;
-	if (!nl_attr_put(&req->n, datalen, FPM_ROUTE_ENCAP_SRV6_VPN_SID,
+	if (!nl_attr_put(&req->n, datalen, FPM_ROUTE_ENCAP_SRV6_SEGMENTS,
 				&nexthop->nh_srv6->seg6_segs->seg[0],
-				IPV6_MAX_BYTELEN))
+				nexthop->nh_srv6->seg6_segs->num_segs * IPV6_MAX_BYTELEN))
 		return false;
+
+	if (!nl_attr_put8(&req->n, datalen, FPM_ROUTE_ENCAP_SRV6_SEGMENTS_NUM,
+			  nexthop->nh_srv6->seg6_segs->num_segs))
+		return false;
+
 	nl_attr_nest_end(&req->n, nest);
 
 	return NLMSG_ALIGN(req->n.nlmsg_len);
